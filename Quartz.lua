@@ -21,17 +21,25 @@ local L = LibStub("AceLocale-3.0"):GetLocale("Quartz3")
 local media = LibStub("LibSharedMedia-3.0")
 local db
 
-local WoW10 = select(4, GetBuildInfo()) >= 100000
+-- Forever runs the mainline UI but sets WOW_PROJECT_ID to WOW_PROJECT_CAMELOT (18) and reports a 1.60.x interface number.
+local tocVersion = select(4, GetBuildInfo())
+Quartz3.IsForever = WOW_PROJECT_ID == WOW_PROJECT_CAMELOT or (tocVersion > 16000 and tocVersion < 20000)
 
 ----------------------------
 -- Upvalues
 -- GLOBALS: LibStub, QuartzDB
-local type, pairs, tonumber = type, pairs, tonumber
+local type, pairs, tonumber, unpack = type, pairs, tonumber, unpack
 
 local defaults = {
 	profile = {
 		modules = { ["*"] = true, ["EnemyCasts"] = false },
 		hidesamwise = true,
+		sparkenabled = true,
+		sparktexture = "Blizzard Spark",
+		sparkwidth = 20,
+		sparkheightmode = "bar",
+		sparkheight = 55,
+		sparkoffset = 0,
 		sparkcolor = {1, 1, 1, 0.5},
 		spelltextcolor = {1, 1, 1},
 		timetextcolor = {1, 1, 1},
@@ -44,6 +52,10 @@ local defaults = {
 		backgroundalpha = 1,
 		borderalpha = 1,
 		casttimeprecision = 1,
+		instantfade = false,
+	},
+	global = {
+		configDialog = {},
 	},
 }
 
@@ -55,16 +67,69 @@ media:Register("statusbar", "Rocks", "Interface\\AddOns\\Quartz\\textures\\Rocks
 media:Register("statusbar", "Runes", "Interface\\AddOns\\Quartz\\textures\\Runes")
 media:Register("statusbar", "Xeon", "Interface\\AddOns\\Quartz\\textures\\Xeon")
 media:Register("statusbar", "Minimalist", "Interface\\AddOns\\Quartz\\textures\\Minimalist")
+media:Register("statusbar", "Blizzard Spark", "Interface\\CastingBar\\UI-CastingBar-Spark")
 media:Register("border", "Tooltip enlarged", "Interface\\AddOns\\Quartz\\textures\\Tooltip-BigBorder")
+
+-- Bump on every profile migration added to CheckUpgrade.
+Quartz3.dbRevision = 2
 
 function Quartz3:OnInitialize()
 	self.db = LibStub("AceDB-3.0"):New("Quartz3DB", defaults, true)
+	-- Registered before the first db.profile access, so a missing revision reliably identifies pre-upgrade profiles.
+	self.db.RegisterCallback(self, "OnNewProfile", "OnNewProfile")
 	db = self.db.profile
 
 	self:SetupOptions()
 end
 
+function Quartz3:OnNewProfile(event, database, key)
+	database.profiles[key].revision = self.dbRevision
+end
+
+function Quartz3:CheckUpgrade()
+	local revision = self.db.profile.revision or 0
+	if revision >= self.dbRevision then
+		return
+	end
+
+	if revision <= 0 then
+		local AuraFilters = self:GetModule("AuraFilters", true)
+		if AuraFilters then
+			AuraFilters:MigrateLegacyFilters()
+		end
+
+		-- Pins the old defaults into existing profiles, touching only values equal to the new default so customizations survive.
+		local buff = self.db:GetNamespace("Buff", true)
+		if buff then
+			if buff.profile.player == true then buff.profile.player = false end
+			if buff.profile.focusgap == 15 then buff.profile.focusgap = 1 end
+		end
+		local mirror = self.db:GetNamespace("Mirror", true)
+		if mirror then
+			if mirror.profile.mirrorposition == "bottomright" then mirror.profile.mirrorposition = "topleft" end
+			if mirror.profile.mirrorgap == 15 then mirror.profile.mirrorgap = 1 end
+		end
+	end
+
+	if revision <= 1 then
+		local swing = self.db:GetNamespace("Swing", true)
+		if swing then
+			if type(swing.profile.x) == "number" then swing.profile.x = swing.profile.x - UIParent:GetWidth() / 2 end
+			if type(swing.profile.y) == "number" then swing.profile.y = swing.profile.y - UIParent:GetHeight() / 2 end
+		end
+	end
+
+	self.db.profile.revision = self.dbRevision
+end
+
+function Quartz3:ProfileChanged()
+	self:CheckUpgrade()
+	self:ApplySettings()
+end
+
 function Quartz3:OnEnable()
+	self:CheckUpgrade()
+
 	if QuartzDB then
 		QuartzDB = nil
 		LibStub("AceTimer-3.0").ScheduleTimer(self, function()
@@ -73,9 +138,9 @@ function Quartz3:OnEnable()
 			self:Print(L["Sorry for the inconvenience, and thanks for using Quartz!"])
 		end, 1)
 	end
-	self.db.RegisterCallback(self, "OnProfileChanged", "ApplySettings")
-	self.db.RegisterCallback(self, "OnProfileCopied", "ApplySettings")
-	self.db.RegisterCallback(self, "OnProfileReset", "ApplySettings")
+	self.db.RegisterCallback(self, "OnProfileChanged", "ProfileChanged")
+	self.db.RegisterCallback(self, "OnProfileCopied", "ProfileChanged")
+	self.db.RegisterCallback(self, "OnProfileReset", "ProfileChanged")
 
 	media.RegisterCallback(self, "LibSharedMedia_Registered", "ApplySettings")
 	media.RegisterCallback(self, "LibSharedMedia_SetGlobal", "ApplySettings")
@@ -95,11 +160,19 @@ end
 function Quartz3:ApplySettings()
 	db = self.db.profile
 
-	for k,v in self:IterateModules() do
+	for i = 1, #self.orderedModules do
+		local v = self.orderedModules[i]
+		local k = v.moduleName
 		if self:GetModuleEnabled(k) and not v:IsEnabled() then
 			self:EnableModule(k)
+			if self.unlock and type(v.Unlock) == "function" then
+				v:Unlock()
+			end
 		elseif not self:GetModuleEnabled(k) and v:IsEnabled() then
 			self:DisableModule(k)
+			if self.unlock and type(v.Lock) == "function" then
+				v:Lock()
+			end
 		end
 		if type(v.ApplySettings) == "function" then
 			v:ApplySettings()
@@ -217,11 +290,19 @@ function Quartz3:SetModuleEnabled(module, value)
 	local old = db.modules[module]
 	db.modules[module] = value
 	if old ~= value then
+		local mod = self:GetModule(module, true)
 		if value then
 			self:EnableModule(module)
+			if self.unlock and mod and type(mod.Unlock) == "function" then
+				mod:Unlock()
+			end
 		else
 			self:DisableModule(module)
+			if self.unlock and mod and type(mod.Lock) == "function" then
+				mod:Lock()
+			end
 		end
+		self:ApplySettings()
 	end
 end
 
@@ -238,6 +319,48 @@ function Quartz3:Merge(source, target)
 end
 
 Quartz3.Util = {}
+
+local fontObjectCache = setmetatable({}, { __mode = "k" })
+local fontObjectCount = 0
+
+function Quartz3.Util.ApplyFontStyle(fontString, font, size, outline, shadowColor, shadowOffsetX, shadowOffsetY)
+	local flags = outline == "SHADOW" and "" or outline
+
+	local fontObject = fontObjectCache[fontString]
+	if not fontObject then
+		fontObjectCount = fontObjectCount + 1
+		fontObject = CreateFont("Quartz3FontObject" .. fontObjectCount)
+		fontObjectCache[fontString] = fontObject
+	end
+
+	fontObject:SetFont(font, size, flags)
+	if outline == "SHADOW" then
+		fontObject:SetShadowColor(unpack(shadowColor))
+		fontObject:SetShadowOffset(shadowOffsetX, shadowOffsetY)
+	else
+		fontObject:SetShadowOffset(0, 0)
+	end
+
+	fontString:SetFontObject(fontObject)
+end
+
+function Quartz3.Util.ApplyCastColor(bar, isImportant, importantColor, importantNoInterruptColor, notInterruptible, noInterruptColor, baseColor)
+	local base, important = baseColor, importantColor
+	local evaluate = C_CurveUtil and C_CurveUtil.EvaluateColorFromBoolean
+	if evaluate then
+		if noInterruptColor then
+			base = evaluate(notInterruptible, noInterruptColor, baseColor)
+		end
+		important = evaluate(notInterruptible, importantNoInterruptColor, importantColor)
+	elseif not issecretvalue(notInterruptible) and notInterruptible then
+		base = noInterruptColor or baseColor
+		important = importantNoInterruptColor
+	end
+	-- Bar color reset to white first so the texture tint alone carries the result.
+	bar:SetStatusBarColor(1, 1, 1, 1)
+	bar:GetStatusBarTexture():SetVertexColorFromBoolean(isImportant, important, base)
+end
+
 function Quartz3.Util.TimeFormat(num, isCastTime)
 	if num <= 10 or (isCastTime and num <= 60) then
 		return ("%%.%df"):format(db.casttimeprecision), num

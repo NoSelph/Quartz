@@ -1,12 +1,11 @@
 ## Title: Quartz
-## Interface: 11508,20505,50503,110207
+## Interface: 120000,120001,120005,120007,120100,120105,16001
 ## Notes: Modular casting bar.
 ## Author: Nevcairiel, Nymbia
-## Version: @project-version@
+## Version: 3.8.11
 ## X-License: GPL v2
 ## X-Credits: Ammo (some code based on PitBull_CastBar), kergoth (Tradeskill Merge module idea), Roartindon (Lag Embed mode for Latency module)
-## X-Curse-Project-ID: 4558
-## X-WoWI-ID: 7158
+## X-Curse-Project-ID: 1456942
 
 ## Title-ruRU: Кварц
 ## Notes-ruRU: Модульная полоса применений.
@@ -56,6 +55,7 @@ modules\Latency.lua
 modules\Tradeskill.lua
 modules\GCD.lua
 modules\Buff.lua
+modules\AuraFilters.lua
 modules\Mirror.lua
 modules\Timer.lua
 modules\Swing.lua

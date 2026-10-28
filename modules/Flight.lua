@@ -137,6 +137,9 @@ end]]
 function Flight:BeginFlight(duration, destination)
 	if not Player:IsEnabled() then return end
 
+	Player.Bar.hasSecretTiming = nil
+	Player.Bar.durationObject = nil
+
 	Player.Bar.casting = true
 	Player.Bar.startTime = GetTime()
 	Player.Bar.endTime = GetTime() + duration
@@ -156,8 +159,10 @@ function Flight:BeginFlight(duration, destination)
 	Player.Bar:Show()
 	Player.Bar:SetAlpha(Player.db.profile.alpha)
 
-	Player.Bar.Spark:Show()
-	if WoWClassic then
+	if Quartz3.db.profile.sparkenabled then
+		Player.Bar.Spark:Show()
+	end
+	if WoWClassic or Quartz3.IsForever then
 		Player.Bar.Icon:SetTexture("Interface\\Icons\\ability_eyeoftheowl")
 	else
 		Player.Bar.Icon:SetTexture("Interface\\Icons\\ability_druid_flightform")

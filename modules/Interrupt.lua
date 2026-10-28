@@ -22,6 +22,14 @@ local L = LibStub("AceLocale-3.0"):GetLocale("Quartz3")
 local MODNAME = "Interrupt"
 local Interrupt = Quartz3:NewModule(MODNAME, "AceEvent-3.0")
 local Player = Quartz3:GetModule("Player")
+local Target = Quartz3:GetModule("Target", true)
+local Focus = Quartz3:GetModule("Focus", true)
+
+local unitToModule = {
+	player = Player,
+	target = Target,
+	focus = Focus,
+}
 
 local db, getOptions
 
@@ -29,7 +37,7 @@ local db, getOptions
 -- Upvalues
 local GetTime = GetTime
 local unpack = unpack
-local SPELLINTERRUPTOTHERSELF, UNKNOWN = SPELLINTERRUPTOTHERSELF, UNKNOWN
+local UnitNameFromGUID = UnitNameFromGUID
 
 local defaults = {
 	profile = {
@@ -46,20 +54,42 @@ function Interrupt:OnInitialize()
 end
 
 function Interrupt:OnEnable()
-	self:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+	self:RegisterEvent("UNIT_SPELLCAST_INTERRUPTED")
 end
 
 function Interrupt:ApplySettings()
 	db = self.db.profile
 end
 
-function Interrupt:COMBAT_LOG_EVENT_UNFILTERED()
-	local timestamp, combatEvent, _, _, sourceName, _, _, _, _, destFlags = CombatLogGetCurrentEventInfo()
-	if combatEvent == "SPELL_INTERRUPT" and destFlags == 0x511 then
-		Player.Bar.Text:SetFormattedText(L["INTERRUPTED (%s)"], (sourceName or UNKNOWN):upper())
-		Player.Bar.Bar:SetStatusBarColor(unpack(db.interruptcolor))
-		Player.Bar.stopTime = GetTime()
+-- C_Intl.ToUpper (12.1.5) accepts secret strings from tainted code and handles non-ASCII letters, string.upper does neither.
+local function UpperName(name)
+	if C_Intl and C_Intl.ToUpper then
+		local upper = C_Intl.ToUpper(name)
+		if type(upper) == "string" then
+			return upper
+		end
 	end
+	if issecretvalue(name) then
+		return name
+	end
+	return name:upper()
+end
+
+function Interrupt:UNIT_SPELLCAST_INTERRUPTED(event, unit, castGUID, spellID, interruptedBy)
+	local mod = unitToModule[unit]
+	if not mod or not mod:IsEnabled() or not mod.Bar then return end
+	-- The payload can be secret, type() is the only nil test allowed on it.
+	local sourceName
+	if type(interruptedBy) == "string" then
+		sourceName = UnitNameFromGUID(interruptedBy)
+	end
+	if type(sourceName) == "string" then
+		mod.Bar.Text:SetText(L["INTERRUPTED (%s)"]:format(UpperName(sourceName)))
+	else
+		mod.Bar.Text:SetText(INTERRUPTED)
+	end
+	mod.Bar.Bar:SetStatusBarColor(unpack(db.interruptcolor))
+	mod.Bar.stopTime = GetTime()
 end
 
 do

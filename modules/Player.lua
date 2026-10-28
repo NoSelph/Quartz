@@ -18,20 +18,27 @@
 ]]
 local Quartz3 = LibStub("AceAddon-3.0"):GetAddon("Quartz3")
 local L = LibStub("AceLocale-3.0"):GetLocale("Quartz3")
+local media = LibStub("LibSharedMedia-3.0")
 
 local MODNAME = "Player"
 local Player = Quartz3:NewModule(MODNAME, "AceEvent-3.0", "AceHook-3.0")
 
 local UnitCastingInfo, UnitChannelInfo = UnitCastingInfo, UnitChannelInfo
 
-local WoWRetail = (WOW_PROJECT_ID == WOW_PROJECT_MAINLINE)
+local WoWRetail = (WOW_PROJECT_ID == WOW_PROJECT_MAINLINE) or Quartz3.IsForever
 local WoWClassicEra = (WOW_PROJECT_ID == WOW_PROJECT_CLASSIC)
 local WoWBC = (WOW_PROJECT_ID == WOW_PROJECT_BURNING_CRUSADE_CLASSIC)
 local WoWWrath = (WOW_PROJECT_ID == WOW_PROJECT_WRATH_CLASSIC)
 local WoWCata = (WOW_PROJECT_ID == WOW_PROJECT_CATACLYSM_CLASSIC)
 local WoWMists = (WOW_PROJECT_ID == WOW_PROJECT_MISTS_CLASSIC)
+local WoWForever = Quartz3.IsForever
 
 local GetSpellName = C_Spell and C_Spell.GetSpellName or GetSpellInfo
+
+-- Forever may lack some Classic spell IDs: an unknown ID keys the entry by number instead of erroring.
+local function spellKey(spellID)
+	return GetSpellName(spellID) or spellID
+end
 
 ----------------------------
 -- Upvalues
@@ -46,17 +53,28 @@ local defaults = {
 	{
 		hideblizz = true,
 		showticks = true,
-		-- no interrupt is pointless for player, disable all options
-		noInterruptBorderChange = false,
-		noInterruptColorChange = false,
+		ticktexture = "Blizzard Spark",
+		tickcolor = {1, 1, 1, 0.5},
+		tickwidth = 20,
+		tickheightmode = "bar",
+		tickheight = 55,
+		noInterruptChangeColor = false,
 		noInterruptShield = false,
-		targetnamestyle = "default"
 	})
 }
 
 do
 	local function setOpt(info, value)
 		db[info[#info]] = value
+		Player:ApplySettings()
+	end
+
+	local function getColor(info)
+		return unpack(db[info[#info]])
+	end
+
+	local function setColor(info, ...)
+		db[info[#info]] = {...}
 		Player:ApplySettings()
 	end
 
@@ -77,27 +95,54 @@ do
 				desc = L["Show damage / mana ticks while channeling spells like Drain Life or Blizzard"],
 				order = 102,
 			}
-			options.args.nlttargetname = {
-				type = "description",
-				name = "",
-				order = 408.0,
-			}
-			options.args.targetname = {
-				type = "toggle",
-				name = L["Show Target Name"],
-				desc = L["Display target name of spellcasts after spell name"],
-				disabled = function() return db.hidenametext end,
-				order = 408.1,
-			}
-			options.args.targetnamestyle = {
+			options.args.ticktexture = {
 				type = "select",
-				name = L["Target Name Style"],
-				desc = L["How to display target name of spellcasts after spell name"],
-				values = {["default"] = L["Spell -> Target"], ["on"] = L["Spell on Target"]},
-				disabled = function() return not db.targetname or db.hidenametext end,
-				order = 409,
+				dialogControl = "LSM30_Statusbar",
+				name = L["Tick Texture"],
+				desc = L["Set the texture of the channeling ticks"],
+				values = AceGUIWidgetLSMlists.statusbar,
+				set = setOpt,
+				disabled = function() return not db.showticks end,
+				order = 103,
 			}
-			options.args.noInterruptGroup = nil
+			options.args.tickcolor = {
+				type = "color",
+				name = L["Tick Color"],
+				desc = L["Set the color of the channeling ticks"],
+				hasAlpha = true,
+				get = getColor,
+				set = setColor,
+				disabled = function() return not db.showticks end,
+				order = 104,
+			}
+			options.args.tickwidth = {
+				type = "range",
+				name = L["Tick Thickness"],
+				desc = L["Set the thickness of the channeling ticks"],
+				min = 1, max = 32, step = 1,
+				set = setOpt,
+				disabled = function() return not db.showticks end,
+				order = 105,
+			}
+			options.args.tickheightmode = {
+				type = "select",
+				name = L["Tick Height"],
+				desc = L["Set the height of the channeling ticks"],
+				values = {["bar"] = L["Bar Height"], ["custom"] = L["Custom"]},
+				set = setOpt,
+				disabled = function() return not db.showticks end,
+				order = 106,
+			}
+			options.args.tickheight = {
+				type = "range",
+				name = L["Custom Height"],
+				desc = L["Set the height of the channeling ticks"],
+				min = 1, max = 128, step = 1,
+				set = setOpt,
+				disabled = function() return not db.showticks end,
+				hidden = function() return db.tickheightmode ~= "custom" end,
+				order = 107,
+			}
 		end
 		return options
 	end
@@ -125,7 +170,7 @@ end
 
 
 function Player:OnEnable()
-	if WoWRetail then
+	if WoWRetail and not WoWForever then
 		self:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED", "UpdateChannelingTicks")
 		self:RegisterEvent("TRAIT_CONFIG_UPDATED", "UpdateChannelingTicks")
 	end
@@ -193,6 +238,7 @@ function Player:ApplySettings()
 	self.Bar:SetConfig(db)
 	if self:IsEnabled() then
 		self.Bar:ApplySettings()
+		self:ApplyTickSettings()
 	end
 end
 
@@ -217,19 +263,34 @@ function Player:OnHide()
 	end
 end
 
+local function styleTick(spark)
+	spark:SetTexture(media:Fetch("statusbar", db.ticktexture))
+	spark:SetVertexColor(unpack(db.tickcolor))
+	spark:SetBlendMode('ADD')
+	spark:SetWidth(db.tickwidth)
+	local tickHeight = db.tickheightmode == "custom" and db.tickheight or db.h
+	-- The Blizzard spark texture has built-in transparent padding, compensate to match the visible height
+	if db.ticktexture == "Blizzard Spark" then
+		tickHeight = tickHeight * 2.2
+	end
+	spark:SetHeight(tickHeight)
+end
+
 local sparkfactory = {
 	__index = function(t,k)
 		local spark = castBar:CreateTexture(nil, 'OVERLAY')
 		t[k] = spark
-		spark:SetTexture("Interface\\CastingBar\\UI-CastingBar-Spark")
-		spark:SetVertexColor(unpack(Quartz3.db.profile.sparkcolor))
-		spark:SetBlendMode('ADD')
-		spark:SetWidth(20)
-		spark:SetHeight(db.h*2.2)
+		styleTick(spark)
 		return spark
 	end
 }
 local barticks = setmetatable({}, sparkfactory)
+
+function Player:ApplyTickSettings()
+	for i = 1, #barticks do
+		styleTick(barticks[i])
+	end
+end
 
 local function setBarTicks(ticknum, duration, ticks)
 	if( ticknum and ticknum > 0) then
@@ -354,26 +415,26 @@ local channelingTicks = WoWWrath and {
 	[GetSpellName(689)] = 5, -- drain life
 	[GetSpellName(1120)] = 5, -- drain soul
 	[GetSpellName(755)] = 10, -- health funnel
-} or WoWClassicEra and {
+} or (WoWClassicEra or WoWForever) and {
 	-- druid
-	[GetSpellName(740)] = 5, -- tranquility
-	[GetSpellName(16914)] = 10, -- hurricane
+	[spellKey(740)] = 5, -- tranquility
+	[spellKey(16914)] = 10, -- hurricane
 	-- hunter
-	[GetSpellName(136)] = 5, -- mend pet
-	[GetSpellName(1510)] = 6, -- volley
+	[spellKey(136)] = 5, -- mend pet
+	[spellKey(1510)] = 6, -- volley
 	-- mage
-	[GetSpellName(10)] = 8, -- blizzard
-	[GetSpellName(5143)] = 3, -- arcane missiles
+	[spellKey(10)] = 8, -- blizzard
+	[spellKey(5143)] = 3, -- arcane missiles
 	-- priest
-	[GetSpellName(15407)] = 3, -- mind flay
-	[GetSpellName(10797)] = 6, -- star shards
+	[spellKey(15407)] = 3, -- mind flay
+	[spellKey(10797)] = 6, -- star shards
 	-- warlock
-	[GetSpellName(1949)] = 15, -- hellfire
-	[GetSpellName(5740)] = 4, -- rain of fire
-	[GetSpellName(5138)] = 5, -- drain mana
-	[GetSpellName(689)] = 5, -- drain life
-	[GetSpellName(1120)] = 5, -- drain soul
-	[GetSpellName(755)] = 10, -- health funnel
+	[spellKey(1949)] = 15, -- hellfire
+	[spellKey(5740)] = 4, -- rain of fire
+	[spellKey(5138)] = 5, -- drain mana
+	[spellKey(689)] = 5, -- drain life
+	[spellKey(1120)] = 5, -- drain soul
+	[spellKey(755)] = 10, -- health funnel
 } or WoWRetail and {
 	--- Retail
 	-- warlock
@@ -403,6 +464,8 @@ local channelingTicks = WoWWrath and {
 	[GetSpellName(117952)] = 4, -- crackling jade lightning
 	[GetSpellName(115175)] = 8, -- soothing mist
 	[GetSpellName(443028)] = 4, -- celestial conduit
+	-- hunter
+	[GetSpellName(257044)] = 7, -- rapid fire
 	-- evoker
 	[GetSpellName(356995)] = 3, -- disintegrate
 	[GetSpellName(370960)] = 5, -- emerald communion
@@ -416,7 +479,22 @@ local function getChannelingTicks(spell, spellid)
 	if not db.showticks then
 		return 0
 	end
-	return channelingTicks[spellid] or channelingTicks[spell] or 0
+	if spellid and not issecretvalue(spellid) then
+		local ticks = channelingTicks[spellid]
+		if ticks then return ticks end
+	end
+	if spell and not issecretvalue(spell) then
+		local ticks = channelingTicks[spell]
+		if ticks then return ticks end
+		-- Entries keyed by ID could not resolve their name at load; match them by name now and cache the key.
+		for key, ticks in pairs(channelingTicks) do
+			if type(key) == "number" and GetSpellName(key) == spell then
+				channelingTicks[spell] = ticks
+				return ticks
+			end
+		end
+	end
+	return 0
 end
 
 local function isTalentKnown(talentID)
@@ -425,7 +503,7 @@ end
 
 function Player:UpdateChannelingTicks()
 	local playerClass = select(2, UnitClass("player"))
-	if WoWRetail then
+	if WoWRetail and not WoWForever then
 		if playerClass == "PRIEST" then
 			-- Castigation talent adds a tick to penance
 			channelingTicks[GetSpellName(47540)] = IsPlayerSpell(193134) and 4 or 3
@@ -438,6 +516,9 @@ function Player:UpdateChannelingTicks()
 		elseif playerClass == "EVOKER" then
 			-- Azure Celerity adds a tick to Disintegrate
 			channelingTicks[GetSpellName(356995)] = IsPlayerSpell(1219723) and 4 or 3
+		elseif playerClass == "HUNTER" then
+			-- Quick Draw adds 3 more ticks of Rapid Fire
+			channelingTicks[GetSpellName(257044)] = IsPlayerSpell(459794) and 10 or 7
 		end
 	end
 end
@@ -482,6 +563,7 @@ function Player:UNIT_SPELLCAST_INTERRUPTED(bar, unit)
 end
 
 function Player:UNIT_SPELLCAST_DELAYED(bar, unit)
+	if bar.hasSecretTiming then return end
 	if bar.channeling and bar.endTime > bar.channelingEnd then
 		local duration = bar.endTime - bar.startTime
 		if bar.channelingDuration and duration > bar.channelingDuration and bar.channelingTicks > 0 then
@@ -524,6 +606,10 @@ function Player:AddStages(bar, numStages)
 
 	for i = 1, bar.NumStages-1, 1 do
 		local duration = self:GetStageDuration(bar, i)
+		if issecretvalue(duration) then
+			self:ClearStages(bar)
+			return
+		end
 		if duration > -1 then
 			sumDuration = sumDuration + duration
 			local portion = sumDuration / stageMaxValue
@@ -598,7 +684,7 @@ end
 
 function Player:UpdateStage(bar)
 	local maxStage = 0;
-	local stageValue = bar.Bar:GetValue() * (bar.endTime - bar.startTime) * 1000
+	local stageValue = (GetTime() - bar.startTime) * 1000
 	for i = 1, bar.NumStages do
 		if bar.StagePoints[i] then
 			if stageValue > bar.StagePoints[i] then

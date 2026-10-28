@@ -18,94 +18,27 @@
 ]]
 local Quartz3 = LibStub("AceAddon-3.0"):GetAddon("Quartz3")
 
-local QuartzStatusBar = CreateFrame("Frame")
+local QuartzStatusBar = CreateFrame("StatusBar")
 local MetaTable = {__index = QuartzStatusBar}
 
-QuartzStatusBar.__min = 0
-QuartzStatusBar.__max = 100
-QuartzStatusBar.__value = 0
-QuartzStatusBar.__orientation = "HORIZONTAL"
 QuartzStatusBar.__rotatesTexture = 1
 
-local DrawBar, UpdateBarValue
-
 function Quartz3:CreateStatusBar(name, parent)
-	local bar = setmetatable(CreateFrame("Frame", name, parent, "BackdropTemplate"), MetaTable)
-	bar.__texture = bar:CreateTexture(nil, "ARTWORK")
-	bar.__texture:SetTexture([[Interface\TargetingFrame\UI-StatusBar]])
-
-	DrawBar(bar)
-
-	return bar
-end
-
-function DrawBar(self)
-	self.__texture:ClearAllPoints()
-	self.__texture:SetPoint("TOPLEFT", self, "TOPLEFT")
-	if self.__orientation == "HORIZONTAL" then
-		self.__texture:SetPoint("BOTTOMLEFT", self, "BOTTOMLEFT")
-	elseif self.__orientation == "VERTICAL" then
-		self.__texture:SetPoint("TOPRIGHT", self, "TOPRIGHT")
-	end
-	local r, g, b, a = 1, 1, 1, 1
-	if self.__color then
-		if #self.__color == 3 then
-			r, g, b = unpack(self.__color)
-		elseif #self.__color == 4 then
-			r, g, b, a = unpack(self.__color)
+	local bar = setmetatable(CreateFrame("StatusBar", name, parent, "BackdropTemplate"), MetaTable)
+	
+	bar:SetStatusBarTexture([[Interface\TargetingFrame\UI-StatusBar]])
+	
+	bar:SetMinMaxValues(0, 100)
+	bar:SetValue(0)
+	
+	hooksecurefunc(bar, "SetOrientation", function(self, orientation)
+		if self.__rotatesTexture then
+			local tex = self:GetStatusBarTexture()
+			if tex then tex:SetRotated(orientation == "VERTICAL") end
 		end
-	end
-	self.__texture:SetVertexColor(r, g, b, a)
-	UpdateBarValue(self)
-end
-
-function UpdateBarValue(self)
-	local perc = 0
-	if self.__max ~= self.__min then
-		perc = (self.__value - self.__min) / (self.__max - self.__min)
-	end
-	perc = min(max(perc, 0), 1)
-	local width = self:GetWidth()
-	self.__texture:SetPoint("RIGHT", self, "LEFT", perc * width, 0)
-	self.__texture:SetTexCoord(0, perc, 0, 1)
-end
-
-function QuartzStatusBar:GetMinMaxValues()
-	return self.__min, self.__max
-end
-
-function QuartzStatusBar:SetMinMaxValues(min, max)
-	if not tonumber(min) or not tonumber(max) then
-		return error(format("QuartzStatusBar:SetMinMaxValues(min, max): Invalid min or max specified! Values were: %q, %q", min, max), 2)
-	end
-	self.__min = tonumber(min)
-	self.__max = tonumber(max)
-	UpdateBarValue(self)
-end
-
-function QuartzStatusBar:GetValue()
-	return self.__value
-end
-
-function QuartzStatusBar:SetValue(value)
-	if not tonumber(value) then
-		return error(format("QuartzStatusBar:SetValue(value): Invalid value specified! Value was: %q", value), 2)
-	end
-	self.__value = tonumber(value)
-	UpdateBarValue(self)
-end
-
-
-function QuartzStatusBar:GetOrientation()
-	return self.__orientation
-end
-
-function QuartzStatusBar:SetOrientation(orientation)
-	if orientation ~= "HORIZONTAL" and orientation ~= "VERTICAL" then
-		return error("QuartzStatusBar:SetOrientation(orientation): Only HORIZONTAL and VERTICAL orientations supported!", 2)
-	end
-	self.__orientation = orientation
-	DrawBar(self)
+	end)
+	
+	return bar
 end
 
 function QuartzStatusBar:GetRotatesTexture()
@@ -114,30 +47,46 @@ end
 
 function QuartzStatusBar:SetRotatesTexture(rotate)
 	self.__rotatesTexture = rotate and 1 or nil
-	DrawBar(self)
-end
-
-function QuartzStatusBar:GetStatusBarColor()
-	return unpack(self.__color)
-end
-
-function QuartzStatusBar:SetStatusBarColor(r, g, b, a)
-	if not (r and g and b) then
-		error("Usage: SetStatusBarColor(r, g, b[, a])", 2)
+	local tex = self:GetStatusBarTexture()
+	if tex then
+		tex:SetRotated(rotate and self:GetOrientation() == "VERTICAL")
 	end
-	self.__color = {r, g, b, a}
-	DrawBar(self)
 end
 
-function QuartzStatusBar:GetStatusBarTexture()
-	return self.__texture
-end
-
-function QuartzStatusBar:SetStatusBarTexture(texture, layer)
-	if type(texture) == "string" then
-		self.__texture:SetTexture(texture)
-	elseif type(texture) == "table" then
-		self.__texture = texture
+function Quartz3:CreateImportantOverlay(host)
+	local overlay = CreateFrame("StatusBar", nil, host)
+	overlay:SetAllPoints(host)
+	overlay:SetFrameLevel(host:GetFrameLevel() + 1)
+	overlay:SetMinMaxValues(0, 1)
+	overlay:Hide()
+	hooksecurefunc(host, "SetMinMaxValues", function(_, ...) overlay:SetMinMaxValues(...) end)
+	hooksecurefunc(host, "SetValue", function(_, ...) overlay:SetValue(...) end)
+	if host.SetTimerDuration then
+		hooksecurefunc(host, "SetTimerDuration", function(_, ...) overlay:SetTimerDuration(...) end)
 	end
-	self.__texture:SetDrawLayer(layer or "ARTWORK")
+	-- Re-setting the texture is how the host reclaims value control after a native timer; the overlay needs the same with its own texture.
+	hooksecurefunc(host, "SetStatusBarTexture", function()
+		if overlay.textureFile then
+			overlay:SetStatusBarTexture(overlay.textureFile)
+		end
+	end)
+	host.ImportantOverlay = overlay
+	return overlay
+end
+
+function Quartz3:SetImportantOverlay(host, isImportant, textureFile, notInterruptible, importantColor, importantNoInterruptColor)
+	local overlay = host.ImportantOverlay
+	if not overlay then return end
+	if issecretvalue(isImportant) or isImportant then
+		if overlay.textureFile ~= textureFile then
+			overlay.textureFile = textureFile
+			overlay:SetStatusBarTexture(textureFile)
+		end
+		overlay:SetStatusBarColor(1, 1, 1, 1)
+		overlay:GetStatusBarTexture():SetVertexColorFromBoolean(notInterruptible, importantNoInterruptColor, importantColor)
+		overlay:Show()
+		overlay:SetAlphaFromBoolean(isImportant, 1, 0)
+	else
+		overlay:Hide()
+	end
 end
