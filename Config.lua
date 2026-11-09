@@ -105,6 +105,14 @@ local function getOptions()
 							get = getOpt,
 							set = setOpt,
 						},
+						nameunlabeled = {
+							type = "toggle",
+							name = L["Name Unlabeled Casts"],
+							desc = L["Show the spell name on casts the game leaves unlabeled, such as opening chests"],
+							order = 104,
+							get = getOpt,
+							set = setOpt,
+						},
 						colors = {
 							type = "group",
 							name = L["Colors"],
