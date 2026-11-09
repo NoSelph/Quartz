@@ -481,10 +481,7 @@ function CastBarTemplate:UNIT_SPELLCAST_START(event, unit, guid, spellID)
 	self:Show()
 	self:SetAlpha(db.alpha)
 
-	-- Object interactions (chests, gathering) come with an empty display text on Forever.
-	if not issecretvalue(displayName) and (displayName == nil or displayName == "") then
-		displayName = spell
-	end
+	displayName = Quartz3.Util.CastDisplayName(spell, displayName)
 	if self.unit ~= "player" then
 		local targetName
 		if db.targetname then

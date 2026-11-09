@@ -53,6 +53,7 @@ local defaults = {
 		borderalpha = 1,
 		casttimeprecision = 1,
 		instantfade = false,
+		nameunlabeled = false,
 	},
 	global = {
 		configDialog = {},
@@ -359,6 +360,21 @@ function Quartz3.Util.ApplyCastColor(bar, isImportant, importantColor, important
 	-- Bar color reset to white first so the texture tint alone carries the result.
 	bar:SetStatusBarColor(1, 1, 1, 1)
 	bar:GetStatusBarTexture():SetVertexColorFromBoolean(isImportant, important, base)
+end
+
+-- Some casts come with an empty display text so cast bars stay blank, such as opening chests and boxes ("Opening - No Text").
+-- With nameunlabeled they show the spell name without the " - No Text" style suffix instead.
+function Quartz3.Util.CastDisplayName(spell, displayName)
+	if issecretvalue(displayName) or (displayName ~= nil and displayName ~= "") then
+		return displayName
+	end
+	if displayName == "" and not db.nameunlabeled then
+		return ""
+	end
+	if spell and not issecretvalue(spell) then
+		spell = spell:match("^(.-) %- ") or spell
+	end
+	return spell
 end
 
 function Quartz3.Util.TimeFormat(num, isCastTime)
