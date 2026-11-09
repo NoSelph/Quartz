@@ -29,6 +29,7 @@ local Player = Quartz3:GetModule("Player")
 local CreateFrame, UIParent = CreateFrame, UIParent
 local UnitExists, UnitCanAssist, UnitCanAttack = UnitExists, UnitCanAssist, UnitCanAttack
 local UnitInRange, UnitName, UnitCastingInfo = UnitInRange, UnitName, UnitCastingInfo
+local UnitIsUnit, IsInRaid, GetNumGroupMembers = UnitIsUnit, IsInRaid, GetNumGroupMembers
 local unpack, select, ipairs, type = unpack, select, ipairs, type
 local hooksecurefunc, issecretvalue = hooksecurefunc, issecretvalue
 
@@ -99,7 +100,8 @@ local f, OnUpdate, db, getOptions, castBar
 local rangeOverlay, rangeCheckedFrame
 -- pendingUnit: unit the last UNIT_SPELLCAST_SENT was aimed at ("target"/"focus"), consumed by the cast start.
 -- rangeUnit/castSpell: unit and spell being range-checked for the current cast.
-local pendingUnit, rangeUnit, castSpell
+-- altUnit: another token for the same unit, taken over when target/focus changes mid-cast.
+local pendingUnit, rangeUnit, castSpell, altUnit
 local cacheTimer, cachePending
 
 local defaults = {
@@ -234,6 +236,9 @@ function Range:OnEnable()
 	self:RegisterEvent("UNIT_SPELLCAST_SENT")
 	self:RegisterEvent("UNIT_SPELLCAST_START")
 	self:RegisterEvent("UNIT_SPELLCAST_CHANNEL_START")
+	self:RegisterEvent("PLAYER_TARGET_CHANGED")
+	self:RegisterEvent("PLAYER_FOCUS_CHANGED")
+	self:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 	self:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED", "UpdateSpellCache")
 	self:RegisterEvent("PLAYER_ENTERING_WORLD", "ScheduleSpellCache")
 	if Quartz3.IsForever then
@@ -252,6 +257,7 @@ end
 
 function Range:OnDisable()
 	f:SetScript("OnUpdate", nil)
+	rangeUnit, castSpell, altUnit = nil, nil, nil
 	if cacheTimer then
 		cacheTimer:Cancel()
 		cacheTimer = nil
@@ -302,28 +308,60 @@ function Range:PLAYER_REGEN_ENABLED()
 	end
 end
 
--- Forever returns the full player name from UnitName("player") but a short target name in the cast payload.
-local function shortName(name)
-	return Quartz3.IsForever and name:match("^[^-]+") or name
+-- The cast payload carries "Name Surname" on Forever and "Name-Realm" cross-realm elsewhere.
+-- Use the first word to identify the character.
+local function firstName(name)
+	return name:match("^[^%s%-]+") or name
 end
 
+-- true/false when the unit's name can be read, nil when it is secret.
 local function sameName(destName, unit)
 	local name = UnitName(unit)
-	if not name or issecretvalue(name) then return false end
-	return shortName(destName) == shortName(name)
+	if issecretvalue(name) then return nil end
+	if not name then return false end
+	return firstName(destName) == firstName(name)
+end
+
+-- UnitIsUnit is secret on addon-restricted maps. A secret answer counts as "not the same".
+local function isSameUnit(a, b)
+	if not UnitExists(a) then return false end
+	local same = UnitIsUnit(a, b)
+	return not issecretvalue(same) and same or false
+end
+
+-- Group tokens follow a unit for the whole cast, nameplate tokens only while its plate is shown.
+local function findAltUnit(unit)
+	local prefix, count = "party", 4
+	if IsInRaid() then
+		prefix, count = "raid", GetNumGroupMembers()
+	end
+	for i = 1, count do
+		if isSameUnit(prefix .. i, unit) then return prefix .. i end
+	end
+	local other = unit == "target" and "focus" or "target"
+	if isSameUnit(other, unit) then return other end
+	for i = 1, 40 do
+		if isSameUnit("nameplate" .. i, unit) then return "nameplate" .. i end
+	end
 end
 
 -- Only casts aimed at the target or focus are range-checked.
 -- UnitName("player") is never secret
-function Range:UNIT_SPELLCAST_SENT(event, unit, destName)
+function Range:UNIT_SPELLCAST_SENT(event, unit, destName, castGUID, spellID)
 	if unit ~= "player" then return end
 	pendingUnit = nil
 	if issecretvalue(destName) or type(destName) ~= "string" or destName == "" then return end
 	if sameName(destName, "player") then return end
-	if sameName(destName, "target") then
+	local isTarget = sameName(destName, "target")
+	if isTarget then
 		pendingUnit = "target"
 	elseif sameName(destName, "focus") then
 		pendingUnit = "focus"
+	elseif isTarget == nil and UnitExists("target") and spellID and not issecretvalue(spellID)
+		and IsSpellInRange(spellID, "target") == true then
+		-- The target's name is secret, so it can't be matched. A cast that's in range of the target is
+		-- most likely aimed at it.
+		pendingUnit = "target"
 	end
 end
 
@@ -341,15 +379,44 @@ function Range:UNIT_SPELLCAST_START(event, unit, castGUID, spellID)
 		setupOverlay()
 		local isTradeSkill = select(6, UnitCastingInfo("player"))
 		if not target or isTradeSkill or not UnitExists(target) then
-			rangeUnit, castSpell = nil, nil
+			rangeUnit, castSpell, altUnit = nil, nil, nil
 			rangeOverlay:SetAlpha(0)
 			rangeCheckedFrame:SetAlpha(1)
 			f:SetScript("OnUpdate", nil)
 		else
 			rangeUnit = target
+			altUnit = findAltUnit(target)
 			castSpell = not issecretvalue(spellID) and spellID or nil
 			f:SetScript("OnUpdate", OnUpdate)
 		end
+	end
+end
+
+-- target/focus changed mid-cast: keep following the cast's unit through its other token, or stop checking.
+local function unitTokenChanged(token)
+	if not rangeUnit then return end
+	if rangeUnit == token then
+		if altUnit and isSameUnit(token, altUnit) then return end -- re-selected the same unit
+		rangeUnit, altUnit = altUnit, nil
+	elseif altUnit == token then
+		altUnit = nil
+	end
+end
+
+function Range:PLAYER_TARGET_CHANGED()
+	unitTokenChanged("target")
+end
+
+function Range:PLAYER_FOCUS_CHANGED()
+	unitTokenChanged("focus")
+end
+
+-- A freed nameplate token can be reassigned to another unit, so it stops identifying the cast's unit.
+function Range:NAME_PLATE_UNIT_REMOVED(event, token)
+	if altUnit == token then
+		altUnit = nil
+	elseif rangeUnit == token then
+		rangeUnit = nil
 	end
 end
 
