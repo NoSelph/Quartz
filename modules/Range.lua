@@ -18,6 +18,7 @@
 ]]
 local Quartz3 = LibStub("AceAddon-3.0"):GetAddon("Quartz3")
 local L = LibStub("AceLocale-3.0"):GetLocale("Quartz3")
+local media = LibStub("LibSharedMedia-3.0")
 
 local MODNAME = "Range"
 local Range = Quartz3:NewModule(MODNAME, "AceEvent-3.0")
@@ -28,7 +29,8 @@ local Player = Quartz3:GetModule("Player")
 local CreateFrame, UIParent = CreateFrame, UIParent
 local UnitExists, UnitCanAssist, UnitCanAttack = UnitExists, UnitCanAssist, UnitCanAttack
 local UnitInRange, UnitName, UnitCastingInfo = UnitInRange, UnitName, UnitCastingInfo
-local unpack, select, ipairs = unpack, select, ipairs
+local unpack, select, ipairs, type = unpack, select, ipairs, type
+local hooksecurefunc, issecretvalue = hooksecurefunc, issecretvalue
 
 local IsSpellInRange = C_Spell.IsSpellInRange
 local IsSpellUsable = C_Spell.IsSpellUsable
@@ -95,7 +97,9 @@ local rangeSpells = { friendly = nil, hostile = nil }
 
 local f, OnUpdate, db, getOptions, castBar
 local rangeOverlay, rangeCheckedFrame
-local selfCast = false
+-- pendingUnit: unit the last UNIT_SPELLCAST_SENT was aimed at ("target"/"focus"), consumed by the cast start.
+-- rangeUnit/castSpell: unit and spell being range-checked for the current cast.
+local pendingUnit, rangeUnit, castSpell
 local cacheTimer, cachePending
 
 local defaults = {
@@ -132,14 +136,29 @@ local function setupOverlay()
 
 	-- Nested alpha holders let the secret UnitInRange booleans drive the overlay without being tested.
 	rangeCheckedFrame = CreateFrame("Frame", nil, castBar)
-	rangeCheckedFrame:SetAllPoints(castBar:GetStatusBarTexture())
+	rangeCheckedFrame:SetAllPoints(castBar)
+	rangeCheckedFrame:SetFrameLevel(castBar:GetFrameLevel() + 2)
 	rangeCheckedFrame:SetAlpha(1)
 
-	rangeOverlay = rangeCheckedFrame:CreateTexture(nil, "OVERLAY")
-	rangeOverlay:SetAllPoints(rangeCheckedFrame)
-	rangeOverlay:SetColorTexture(1, 1, 1)
-	rangeOverlay:SetVertexColor(unpack(db.rangecolor))
+	-- Mirror StatusBar drawn with the cast bar's own texture and tinted with rangecolor.
+	rangeOverlay = CreateFrame("StatusBar", nil, rangeCheckedFrame)
+	rangeOverlay:SetAllPoints(castBar)
+	rangeOverlay:SetStatusBarTexture(media:Fetch("statusbar", Player.db.profile.texture))
+	rangeOverlay:SetStatusBarColor(unpack(db.rangecolor))
+	rangeOverlay:SetMinMaxValues(castBar:GetMinMaxValues())
+	rangeOverlay:SetValue(castBar:GetValue())
 	rangeOverlay:SetAlpha(0)
+
+	hooksecurefunc(castBar, "SetMinMaxValues", function(_, ...) rangeOverlay:SetMinMaxValues(...) end)
+	hooksecurefunc(castBar, "SetValue", function(_, ...) rangeOverlay:SetValue(...) end)
+	if castBar.SetTimerDuration then
+		hooksecurefunc(castBar, "SetTimerDuration", function(_, ...) rangeOverlay:SetTimerDuration(...) end)
+	end
+
+	hooksecurefunc(castBar, "SetStatusBarTexture", function(_, asset)
+		rangeOverlay:SetStatusBarTexture(asset)
+		rangeOverlay:SetStatusBarColor(unpack(db.rangecolor))
+	end)
 end
 
 ----------------------------
@@ -162,30 +181,38 @@ do
 		end
 		sincelast = 0
 
-		local spell
-		if UnitCanAssist("player", "target") then
-			spell = rangeSpells.friendly
-		elseif UnitCanAttack("player", "target") then
-			spell = rangeSpells.hostile
-		end
-
-		if spell then
-			-- C_Spell.IsSpellInRange returns non-secret true/false/nil
-			local result = IsSpellInRange(spell, "target")
-			rangeCheckedFrame:SetAlpha(1)
-			if result ~= nil then
-				rangeOverlay:SetAlphaFromBoolean(result, 0, 1)
-			else
-				rangeOverlay:SetAlpha(0)
-			end
-		elseif UnitExists("target") then
-			-- UnitInRange returns secret booleans.
-			local inRange, checkedRange = UnitInRange("target")
-			rangeCheckedFrame:SetAlphaFromBoolean(checkedRange, 1, 0)
-			rangeOverlay:SetAlphaFromBoolean(inRange, 0, 1)
-		else
+		local unit = rangeUnit
+		if not unit or not UnitExists(unit) then
 			rangeOverlay:SetAlpha(0)
 			rangeCheckedFrame:SetAlpha(1)
+			return
+		end
+
+		-- Prefer the spell actually being cast, but fall back to the class range spell.
+		local result
+		if castSpell then
+			result = IsSpellInRange(castSpell, unit)
+		end
+		if result == nil then
+			local spell
+			if UnitCanAssist("player", unit) then
+				spell = rangeSpells.friendly
+			elseif UnitCanAttack("player", unit) then
+				spell = rangeSpells.hostile
+			end
+			if spell then
+				result = IsSpellInRange(spell, unit)
+			end
+		end
+
+		if result ~= nil then
+			rangeCheckedFrame:SetAlpha(1)
+			rangeOverlay:SetAlphaFromBoolean(result, 0, 1)
+		else
+			-- UnitInRange returns secrets.
+			local inRange, checkedRange = UnitInRange(unit)
+			rangeCheckedFrame:SetAlphaFromBoolean(checkedRange, 1, 0)
+			rangeOverlay:SetAlphaFromBoolean(inRange, 0, 1)
 		end
 	end
 end
@@ -214,6 +241,13 @@ function Range:OnEnable()
 		self:RegisterEvent("PLAYER_REGEN_ENABLED")
 	end
 	updateSpellCache()
+
+	if not castBar and Player.Bar then
+		castBar = Player.Bar.Bar
+	end
+	if castBar then
+		setupOverlay()
+	end
 end
 
 function Range:OnDisable()
@@ -232,7 +266,7 @@ end
 function Range:ApplySettings()
 	db = self.db.profile
 	if rangeOverlay then
-		rangeOverlay:SetVertexColor(unpack(db.rangecolor))
+		rangeOverlay:SetStatusBarColor(unpack(db.rangecolor))
 	end
 end
 
@@ -273,27 +307,47 @@ local function shortName(name)
 	return Quartz3.IsForever and name:match("^[^-]+") or name
 end
 
+local function sameName(destName, unit)
+	local name = UnitName(unit)
+	if not name or issecretvalue(name) then return false end
+	return shortName(destName) == shortName(name)
+end
+
+-- Only casts aimed at the target or focus are range-checked.
 -- UnitName("player") is never secret
 function Range:UNIT_SPELLCAST_SENT(event, unit, destName)
 	if unit ~= "player" then return end
-	selfCast = not issecretvalue(destName) and type(destName) == "string" and shortName(destName) == shortName(UnitName("player"))
+	pendingUnit = nil
+	if issecretvalue(destName) or type(destName) ~= "string" or destName == "" then return end
+	if sameName(destName, "player") then return end
+	if sameName(destName, "target") then
+		pendingUnit = "target"
+	elseif sameName(destName, "focus") then
+		pendingUnit = "focus"
+	end
 end
 
-function Range:UNIT_SPELLCAST_START(event, unit)
+function Range:UNIT_SPELLCAST_START(event, unit, castGUID, spellID)
 	if unit ~= "player" then
 		return
 	end
 	if not castBar and Player.Bar then
 		castBar = Player.Bar.Bar
 	end
+	-- Consume the SENT result so it can't leak into a later cast that had no SENT.
+	local target = pendingUnit
+	pendingUnit = nil
 	if castBar then
 		setupOverlay()
 		local isTradeSkill = select(6, UnitCastingInfo("player"))
-		if selfCast or isTradeSkill or not UnitExists("target") then
+		if not target or isTradeSkill or not UnitExists(target) then
+			rangeUnit, castSpell = nil, nil
 			rangeOverlay:SetAlpha(0)
 			rangeCheckedFrame:SetAlpha(1)
 			f:SetScript("OnUpdate", nil)
 		else
+			rangeUnit = target
+			castSpell = not issecretvalue(spellID) and spellID or nil
 			f:SetScript("OnUpdate", OnUpdate)
 		end
 	end
@@ -333,7 +387,7 @@ do
 						set = function(info, ...)
 							db.rangecolor = { ... }
 							if rangeOverlay then
-								rangeOverlay:SetVertexColor(unpack(db.rangecolor))
+								rangeOverlay:SetStatusBarColor(unpack(db.rangecolor))
 							end
 						end,
 						order = 101,
