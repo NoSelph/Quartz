@@ -99,9 +99,10 @@ local rangeSpells = { friendly = nil, hostile = nil }
 local f, OnUpdate, db, getOptions, castBar
 local rangeOverlay, rangeCheckedFrame
 -- pendingUnit: unit the last UNIT_SPELLCAST_SENT was aimed at ("target"/"focus"), consumed by the cast start.
+-- pendingGUID: castGUID of that SENT, so a later cast (e.g. opening a world object) can't pick it up.
 -- rangeUnit/castSpell: unit and spell being range-checked for the current cast.
 -- altUnit: another token for the same unit, taken over when target/focus changes mid-cast.
-local pendingUnit, rangeUnit, castSpell, altUnit
+local pendingUnit, pendingGUID, rangeUnit, castSpell, altUnit
 local cacheTimer, cachePending
 
 local defaults = {
@@ -236,6 +237,10 @@ function Range:OnEnable()
 	self:RegisterEvent("UNIT_SPELLCAST_SENT")
 	self:RegisterEvent("UNIT_SPELLCAST_START")
 	self:RegisterEvent("UNIT_SPELLCAST_CHANNEL_START")
+	self:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED", "ClearPendingCast")
+	self:RegisterEvent("UNIT_SPELLCAST_FAILED", "ClearPendingCast")
+	self:RegisterEvent("UNIT_SPELLCAST_FAILED_QUIET", "ClearPendingCast")
+	self:RegisterEvent("UNIT_SPELLCAST_INTERRUPTED", "ClearPendingCast")
 	self:RegisterEvent("PLAYER_TARGET_CHANGED")
 	self:RegisterEvent("PLAYER_FOCUS_CHANGED")
 	self:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
@@ -258,6 +263,7 @@ end
 function Range:OnDisable()
 	f:SetScript("OnUpdate", nil)
 	rangeUnit, castSpell, altUnit = nil, nil, nil
+	pendingUnit, pendingGUID = nil, nil
 	if cacheTimer then
 		cacheTimer:Cancel()
 		cacheTimer = nil
@@ -350,6 +356,7 @@ end
 function Range:UNIT_SPELLCAST_SENT(event, unit, destName, castGUID, spellID)
 	if unit ~= "player" then return end
 	pendingUnit = nil
+	pendingGUID = not issecretvalue(castGUID) and castGUID or nil
 	if issecretvalue(destName) or type(destName) ~= "string" or destName == "" then return end
 	if sameName(destName, "player") then return end
 	local isTarget = sameName(destName, "target")
@@ -374,7 +381,12 @@ function Range:UNIT_SPELLCAST_START(event, unit, castGUID, spellID)
 	end
 	-- Consume the SENT result so it can't leak into a later cast that had no SENT.
 	local target = pendingUnit
-	pendingUnit = nil
+	if target and pendingGUID and event == "UNIT_SPELLCAST_START" and not issecretvalue(castGUID)
+		and castGUID and castGUID ~= "" and castGUID ~= pendingGUID then
+		-- Started a different cast than the one SENT was aimed with.
+		target = nil
+	end
+	pendingUnit, pendingGUID = nil, nil
 	if castBar then
 		setupOverlay()
 		local isTradeSkill = select(6, UnitCastingInfo("player"))
@@ -390,6 +402,13 @@ function Range:UNIT_SPELLCAST_START(event, unit, castGUID, spellID)
 			f:SetScript("OnUpdate", OnUpdate)
 		end
 	end
+end
+
+-- A SENT cast that ends without a cast start (instant, failed) must not leave its unit for the next cast.
+function Range:ClearPendingCast(event, unit, castGUID)
+	if unit ~= "player" or not pendingUnit then return end
+	if pendingGUID and not issecretvalue(castGUID) and castGUID and castGUID ~= pendingGUID then return end
+	pendingUnit, pendingGUID = nil, nil
 end
 
 -- target/focus changed mid-cast: keep following the cast's unit through its other token, or stop checking.
