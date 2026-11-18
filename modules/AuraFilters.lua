@@ -193,6 +193,7 @@ local function resolveSpellInput(value)
 	end
 	return nil
 end
+Quartz3.Util.ResolveSpellInput = resolveSpellInput
 
 ----------------------------
 -- Input widgets: an EditBox that also accepts spellbook drags and shift-clicked links.
